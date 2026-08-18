@@ -7,10 +7,11 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
+    "@ton/core": "^0.62.0",
+    "@ton/crypto": "^3.3.0",
+    "@ton/ton": "^15.0.0",
     "cors": "^2.8.5",
-    "better-sqlite3": "^11.3.0",
     "dotenv": "^16.4.5",
-    "node-fetch": "^3.3.2"
+    "express": "^4.21.2"
   }
 }
