@@ -1,164 +1,183 @@
+const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 
-const { saveWallet } = require("../database");
-
-
 const app = express();
 
-
 app.use(cors());
-
 app.use(express.json());
 
+/*
+  Temporary in-memory proof storage.
+
+  This is intentionally temporary.
+  Before production we will replace it with persistent storage.
+*/
+
+const proofRequests = new Map();
+
+const PROOF_TTL_MS = 5 * 60 * 1000;
 
 
-async function sendAdminMessage(message) {
+/*
+  Generate a cryptographically secure nonce.
+*/
 
-    try {
+function generateNonce() {
+    return crypto.randomBytes(32).toString("hex");
+}
 
-        if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.ADMIN_CHAT_ID) {
-            console.log("Telegram settings missing");
-            return;
+
+/*
+  Remove expired proof requests.
+*/
+
+function cleanupExpiredRequests() {
+
+    const now = Date.now();
+
+    for (const [nonce, data] of proofRequests.entries()) {
+
+        if (now - data.createdAt > PROOF_TTL_MS) {
+            proofRequests.delete(nonce);
         }
-
-
-        await fetch(
-            `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-            {
-
-                method: "POST",
-
-                headers:{
-                    "Content-Type":"application/json"
-                },
-
-                body:JSON.stringify({
-
-                    chat_id:process.env.ADMIN_CHAT_ID,
-
-                    text:message,
-
-                    parse_mode:"HTML"
-
-                })
-
-            }
-        );
-
-
-    } catch(error){
-
-        console.log(error.message);
 
     }
 
 }
 
 
+/*
+  API status.
+*/
 
-
-
-app.get("/", (req,res)=>{
+app.get("/", (req, res) => {
 
     res.json({
-
-        status:"MEXO API Online"
-
+        success: true,
+        service: "MEXO Wallet API",
+        status: "online"
     });
 
 });
 
 
+/*
+  Create a new TON Proof payload.
+*/
+
+app.post("/api/ton-proof/payload", (req, res) => {
+
+    cleanupExpiredRequests();
+
+    const nonce = generateNonce();
+
+    proofRequests.set(nonce, {
+        createdAt: Date.now()
+    });
+
+    res.json({
+        success: true,
+        payload: nonce,
+        expires_in: 300
+    });
+
+});
 
 
+/*
+  Verify endpoint.
 
+  IMPORTANT:
+  This endpoint currently validates the request structure only.
 
-app.post("/verify-wallet", async (req,res)=>{
+  Real TON Proof cryptographic verification will be added
+  after the production domain and TON Connect configuration
+  are finalized.
+*/
 
+app.post("/api/ton-proof/verify", async (req, res) => {
+
+    cleanupExpiredRequests();
 
     const {
-
-        telegram_id,
-
-        username,
-
-        wallet_address
-
-
+        payload,
+        address,
+        proof
     } = req.body;
 
 
-
-    if(!wallet_address){
+    if (!payload) {
 
         return res.status(400).json({
-
-            success:false,
-
-            error:"Wallet address required"
-
+            success: false,
+            error: "Proof payload is required"
         });
 
     }
 
 
+    if (!address) {
 
-    saveWallet({
+        return res.status(400).json({
+            success: false,
+            error: "Wallet address is required"
+        });
 
-        telegram_id,
+    }
 
-        username,
 
-        wallet_address,
+    if (!proof) {
 
-        verified:1
+        return res.status(400).json({
+            success: false,
+            error: "TON Proof is required"
+        });
+
+    }
+
+
+    const request = proofRequests.get(payload);
+
+
+    if (!request) {
+
+        return res.status(400).json({
+            success: false,
+            error: "Invalid or expired proof payload"
+        });
+
+    }
+
+
+    /*
+      Payload is one-time use.
+    */
+
+    proofRequests.delete(payload);
+
+
+    /*
+      Do NOT mark the wallet as verified yet.
+
+      Cryptographic verification will be performed
+      in the next backend step.
+    */
+
+    return res.json({
+
+        success: true,
+
+        verified: false,
+
+        status: "proof_received",
+
+        message:
+            "Proof received. Cryptographic verification is pending."
 
     });
-
-
-
-
-
-    await sendAdminMessage(`
-
-🔐 <b>NEW VERIFIED WALLET</b>
-
-
-👤 User:
-${username || "Unknown"}
-
-
-🆔 Telegram ID:
-${telegram_id || "Unknown"}
-
-
-💎 Wallet:
-<code>${wallet_address}</code>
-
-
-✅ Verified
-
-🕒 ${new Date().toISOString()}
-
-`);
-
-
-
-
-
-    res.json({
-
-        success:true,
-
-        message:"Wallet saved"
-
-    });
-
 
 });
-
-
 
 
 module.exports = app;
