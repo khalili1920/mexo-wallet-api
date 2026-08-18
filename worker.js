@@ -4,5 +4,5 @@ export default {
       "MEXO Wallet API is online"
     );
   }
-};
+}; 
  
