@@ -1,45 +1,59 @@
-const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 
+const {
+    generatePayload,
+    verifyTonProof
+} = require("../ton-proof");
+
+
 const app = express();
 
+
 app.use(cors());
+
 app.use(express.json());
 
-/*
-  Temporary in-memory proof storage.
-
-  This is intentionally temporary.
-  Before production we will replace it with persistent storage.
-*/
-
-const proofRequests = new Map();
-
-const PROOF_TTL_MS = 5 * 60 * 1000;
 
 
 /*
-  Generate a cryptographically secure nonce.
-*/
+ * Temporary proof sessions.
+ *
+ * This is intentionally in-memory for development.
+ * We will move this to persistent storage before production.
+ */
 
-function generateNonce() {
-    return crypto.randomBytes(32).toString("hex");
-}
+const proofSessions = new Map();
+
+
+const PROOF_SESSION_TTL =
+    5 * 60 * 1000;
+
 
 
 /*
-  Remove expired proof requests.
-*/
+ * Remove expired sessions.
+ */
 
-function cleanupExpiredRequests() {
+function cleanupSessions() {
 
     const now = Date.now();
 
-    for (const [nonce, data] of proofRequests.entries()) {
 
-        if (now - data.createdAt > PROOF_TTL_MS) {
-            proofRequests.delete(nonce);
+    for (
+        const [payload, session]
+        of proofSessions.entries()
+    ) {
+
+        if (
+            now - session.createdAt >
+            PROOF_SESSION_TTL
+        ) {
+
+            proofSessions.delete(
+                payload
+            );
+
         }
 
     }
@@ -47,137 +61,299 @@ function cleanupExpiredRequests() {
 }
 
 
-/*
-  API status.
-*/
 
 app.get("/", (req, res) => {
 
     res.json({
+
         success: true,
+
         service: "MEXO Wallet API",
+
         status: "online"
+
     });
 
 });
+
 
 
 /*
-  Create a new TON Proof payload.
-*/
+ * Create TON Proof payload.
+ */
 
-app.post("/api/ton-proof/payload", (req, res) => {
+app.post(
+    "/api/ton-proof/payload",
+    (req, res) => {
 
-    cleanupExpiredRequests();
+        cleanupSessions();
 
-    const nonce = generateNonce();
 
-    proofRequests.set(nonce, {
-        createdAt: Date.now()
-    });
+        const payload =
+            generatePayload();
 
-    res.json({
-        success: true,
-        payload: nonce,
-        expires_in: 300
-    });
 
-});
+        proofSessions.set(
+            payload,
+            {
+
+                createdAt:
+                    Date.now(),
+
+                used: false
+
+            }
+        );
+
+
+        res.json({
+
+            success: true,
+
+            payload,
+
+            expires_in: 300
+
+        });
+
+    }
+);
+
 
 
 /*
-  Verify endpoint.
+ * Verify TON Proof.
+ */
 
-  IMPORTANT:
-  This endpoint currently validates the request structure only.
+app.post(
+    "/api/ton-proof/verify",
+    async (req, res) => {
 
-  Real TON Proof cryptographic verification will be added
-  after the production domain and TON Connect configuration
-  are finalized.
-*/
+        try {
 
-app.post("/api/ton-proof/verify", async (req, res) => {
-
-    cleanupExpiredRequests();
-
-    const {
-        payload,
-        address,
-        proof
-    } = req.body;
+            cleanupSessions();
 
 
-    if (!payload) {
+            const {
 
-        return res.status(400).json({
-            success: false,
-            error: "Proof payload is required"
-        });
+                payload,
+
+                account,
+
+                proof
+
+            } = req.body;
+
+
+
+            if (!payload) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    error:
+                        "Proof payload is required"
+
+                });
+
+            }
+
+
+
+            if (!account) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    error:
+                        "Wallet account is required"
+
+                });
+
+            }
+
+
+
+            if (!proof) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    error:
+                        "TON Proof is required"
+
+                });
+
+            }
+
+
+
+            /*
+             * Find the payload session.
+             */
+
+            const session =
+                proofSessions.get(
+                    payload
+                );
+
+
+
+            if (!session) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    error:
+                        "Invalid or expired payload"
+
+                });
+
+            }
+
+
+
+            /*
+             * Prevent replay.
+             */
+
+            if (session.used) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    error:
+                        "Proof payload already used"
+
+                });
+
+            }
+
+
+
+            /*
+             * Domain comes from Environment Variable.
+             *
+             * This prevents hard-coding the temporary
+             * GitHub Pages domain.
+             */
+
+            const expectedDomain =
+                process.env.MEXO_APP_DOMAIN;
+
+
+
+            if (!expectedDomain) {
+
+                return res.status(500).json({
+
+                    success: false,
+
+                    error:
+                        "MEXO_APP_DOMAIN is not configured"
+
+                });
+
+            }
+
+
+
+            /*
+             * Mark payload as used BEFORE
+             * cryptographic verification.
+             *
+             * This prevents repeated attempts
+             * with the same nonce.
+             */
+
+            session.used = true;
+
+
+
+            /*
+             * Perform TON Proof verification.
+             */
+
+            const result =
+                await verifyTonProof({
+
+                    account,
+
+                    proof,
+
+                    expectedPayload:
+                        payload,
+
+                    expectedDomain
+
+                });
+
+
+
+            /*
+             * Successful cryptographic verification.
+             */
+
+            proofSessions.delete(
+                payload
+            );
+
+
+
+            return res.json({
+
+                success: true,
+
+                verified:
+                    result.verified,
+
+                wallet: {
+
+                    address:
+                        result.address,
+
+                    network:
+                        result.network,
+
+                    publicKey:
+                        result.publicKey
+
+                }
+
+            });
+
+
+
+        } catch (error) {
+
+            console.error(
+                "TON Proof verification error:",
+                error
+            );
+
+
+            return res.status(400).json({
+
+                success: false,
+
+                verified: false,
+
+                error:
+                    error.message ||
+                    "TON Proof verification failed"
+
+            });
+
+        }
 
     }
+);
 
-
-    if (!address) {
-
-        return res.status(400).json({
-            success: false,
-            error: "Wallet address is required"
-        });
-
-    }
-
-
-    if (!proof) {
-
-        return res.status(400).json({
-            success: false,
-            error: "TON Proof is required"
-        });
-
-    }
-
-
-    const request = proofRequests.get(payload);
-
-
-    if (!request) {
-
-        return res.status(400).json({
-            success: false,
-            error: "Invalid or expired proof payload"
-        });
-
-    }
-
-
-    /*
-      Payload is one-time use.
-    */
-
-    proofRequests.delete(payload);
-
-
-    /*
-      Do NOT mark the wallet as verified yet.
-
-      Cryptographic verification will be performed
-      in the next backend step.
-    */
-
-    return res.json({
-
-        success: true,
-
-        verified: false,
-
-        status: "proof_received",
-
-        message:
-            "Proof received. Cryptographic verification is pending."
-
-    });
-
-});
 
 
 module.exports = app;
