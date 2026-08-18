@@ -1,40 +1,51 @@
+const crypto = require("crypto");
+
 const {
     Address,
     Cell,
     contractAddress,
-    loadStateInit,
     domainSignVerify,
-    WalletContractV1R1,
-    WalletContractV1R2,
-    WalletContractV1R3,
-    WalletContractV2R1,
-    WalletContractV2R2,
-    WalletContractV3R1,
-    WalletContractV3R2,
-    WalletContractV4,
-    WalletContractV5R1
+    loadStateInit
 } = require("@ton/ton");
 
 const {
     sha256
 } = require("@ton/crypto");
 
-const {
-    Buffer
-} = require("buffer");
-
 
 const TON_PROOF_PREFIX = "ton-proof-item-v2/";
-
 const TON_CONNECT_PREFIX = "ton-connect";
 
-const MAX_PROOF_AGE = 15 * 60;
+const MAX_PROOF_AGE_SECONDS = 15 * 60;
+const MAX_FUTURE_SKEW_SECONDS = 60;
 
 
+/*
+ * Generate a cryptographically secure payload.
+ */
+function generatePayload() {
 
+    return crypto
+        .randomBytes(32)
+        .toString("base64url");
+
+}
+
+
+/*
+ * TON network signature domain.
+ *
+ * Mainnet  = -239
+ * Testnet  = -3
+ *
+ * Other network IDs use their L2 global ID.
+ */
 function getSignatureDomain(network) {
 
-    if (network === "-239" || network === "-3") {
+    if (
+        String(network) === "-239" ||
+        String(network) === "-3"
+    ) {
 
         return {
             type: "empty"
@@ -42,183 +53,85 @@ function getSignatureDomain(network) {
 
     }
 
+
+    const globalId = Number(network);
+
+
+    if (!Number.isSafeInteger(globalId)) {
+
+        throw new Error(
+            "Invalid TON network"
+        );
+
+    }
+
+
     return {
         type: "l2",
-        globalId: Number(network)
+        globalId
     };
 
 }
 
 
+/*
+ * Build the exact message specified by TON Connect.
+ */
+function buildTonProofMessage(
+    account,
+    proof
+) {
 
-function loadV1(slice) {
-
-    slice.loadUint(32);
-
-    return slice.loadBuffer(32);
-
-}
-
-
-
-function loadV2(slice) {
-
-    slice.loadUint(32);
-
-    return slice.loadBuffer(32);
-
-}
+    const address = Address.parse(
+        account.address
+    );
 
 
-
-function loadV3(slice) {
-
-    slice.loadUint(32);
-
-    slice.loadUint(32);
-
-    return slice.loadBuffer(32);
-
-}
+    const domainBytes = Buffer.from(
+        proof.domain.value,
+        "utf8"
+    );
 
 
+    if (
+        proof.domain.lengthBytes !==
+        domainBytes.length
+    ) {
 
-function loadV4(slice) {
-
-    slice.loadUint(32);
-
-    slice.loadUint(32);
-
-    return slice.loadBuffer(32);
-
-}
-
-
-
-function loadV5(slice) {
-
-    slice.loadBoolean();
-
-    slice.loadUint(32);
-
-    slice.loadUint(32);
-
-    return slice.loadBuffer(32);
-
-}
-
-
-
-function buildKnownWallets() {
-
-    const wallets = [
-
-        {
-            contract: WalletContractV1R1,
-            loader: loadV1
-        },
-
-        {
-            contract: WalletContractV1R2,
-            loader: loadV1
-        },
-
-        {
-            contract: WalletContractV1R3,
-            loader: loadV1
-        },
-
-        {
-            contract: WalletContractV2R1,
-            loader: loadV2
-        },
-
-        {
-            contract: WalletContractV2R2,
-            loader: loadV2
-        },
-
-        {
-            contract: WalletContractV3R1,
-            loader: loadV3
-        },
-
-        {
-            contract: WalletContractV3R2,
-            loader: loadV3
-        },
-
-        {
-            contract: WalletContractV4,
-            loader: loadV4
-        },
-
-        {
-            contract: WalletContractV5R1,
-            loader: loadV5
-        }
-
-    ];
-
-
-    return wallets.map(item => ({
-
-        code: item.contract.create({
-
-            workchain: 0,
-
-            publicKey: Buffer.alloc(32)
-
-        }).init.code,
-
-        loader: item.loader
-
-    }));
-
-}
-
-
-
-function tryExtractPublicKey(stateInit) {
-
-    if (!stateInit.code || !stateInit.data) {
-
-        return null;
+        throw new Error(
+            "Invalid domain length"
+        );
 
     }
 
 
-    const wallets = buildKnownWallets();
+    if (
+        domainBytes.length > 128
+    ) {
 
-
-    for (const wallet of wallets) {
-
-        try {
-
-            if (wallet.code.equals(stateInit.code)) {
-
-                return wallet.loader(
-                    stateInit.data.beginParse()
-                );
-
-            }
-
-        } catch (error) {
-
-            continue;
-
-        }
+        throw new Error(
+            "Domain is too long"
+        );
 
     }
 
 
-    return null;
+    const payloadBytes = Buffer.from(
+        proof.payload,
+        "utf8"
+    );
 
-}
 
+    if (
+        payloadBytes.length > 128
+    ) {
 
+        throw new Error(
+            "Proof payload is too long"
+        );
 
-function buildProofDigest(address, proof) {
+    }
+
 
     const workchain = Buffer.alloc(4);
 
@@ -228,33 +141,23 @@ function buildProofDigest(address, proof) {
     );
 
 
-    const domainBytes =
-        Buffer.from(
-            proof.domain.value,
-            "utf8"
-        );
+    const domainLength = Buffer.alloc(4);
 
-
-    if (
-        proof.domain.lengthBytes !==
-        domainBytes.length
-    ) {
-
-        throw new Error(
-            "Domain length mismatch"
-        );
-
-    }
+    domainLength.writeUInt32LE(
+        domainBytes.length,
+        0
+    );
 
 
     const timestamp = Buffer.alloc(8);
 
     timestamp.writeBigUInt64LE(
-        BigInt(proof.timestamp)
+        BigInt(proof.timestamp),
+        0
     );
 
 
-    const message = Buffer.concat([
+    return Buffer.concat([
 
         Buffer.from(
             TON_PROOF_PREFIX,
@@ -265,112 +168,238 @@ function buildProofDigest(address, proof) {
 
         address.hash,
 
-        (() => {
-
-            const length = Buffer.alloc(4);
-
-            length.writeUInt32LE(
-                domainBytes.length
-            );
-
-            return length;
-
-        })(),
+        domainLength,
 
         domainBytes,
 
         timestamp,
 
-        Buffer.from(
-            proof.payload,
-            "utf8"
-        )
+        payloadBytes
 
     ]);
+
+}
+
+
+/*
+ * Build the digest that the Wallet actually signs.
+ */
+async function buildTonProofDigest(
+    account,
+    proof
+) {
+
+    const message =
+        buildTonProofMessage(
+            account,
+            proof
+        );
 
 
     const messageHash =
         Buffer.from(
-            sha256(message)
+            await sha256(message)
         );
 
 
-    const fullMessage =
-        Buffer.concat([
+    const fullMessage = Buffer.concat([
 
-            Buffer.from([
-                0xff,
-                0xff
-            ]),
+        Buffer.from([
+            0xff,
+            0xff
+        ]),
 
-            Buffer.from(
-                TON_CONNECT_PREFIX,
-                "utf8"
-            ),
+        Buffer.from(
+            TON_CONNECT_PREFIX,
+            "utf8"
+        ),
 
-            messageHash
+        messageHash
 
-        ]);
+    ]);
 
 
     return Buffer.from(
-        sha256(fullMessage)
+        await sha256(fullMessage)
     );
 
 }
 
 
+/*
+ * Verify timestamp.
+ */
+function verifyTimestamp(timestamp) {
 
+    const now =
+        Math.floor(
+            Date.now() / 1000
+        );
+
+
+    const proofTime =
+        Number(timestamp);
+
+
+    if (
+        !Number.isSafeInteger(
+            proofTime
+        )
+    ) {
+
+        throw new Error(
+            "Invalid proof timestamp"
+        );
+
+    }
+
+
+    if (
+        proofTime >
+        now + MAX_FUTURE_SKEW_SECONDS
+    ) {
+
+        throw new Error(
+            "Proof timestamp is in the future"
+        );
+
+    }
+
+
+    if (
+        now - proofTime >
+        MAX_PROOF_AGE_SECONDS
+    ) {
+
+        throw new Error(
+            "Proof has expired"
+        );
+
+    }
+
+
+    return true;
+
+}
+
+
+/*
+ * Verify that walletStateInit produces
+ * the same address reported by the Wallet.
+ */
+function verifyStateInitAddress(
+    account
+) {
+
+    if (
+        !account.walletStateInit
+    ) {
+
+        throw new Error(
+            "walletStateInit is missing"
+        );
+
+    }
+
+
+    const stateInitCell =
+        Cell.fromBase64(
+            account.walletStateInit
+        );
+
+
+    const stateInit =
+        loadStateInit(
+            stateInitCell.beginParse()
+        );
+
+
+    const address =
+        Address.parse(
+            account.address
+        );
+
+
+    const derivedAddress =
+        contractAddress(
+            address.workChain,
+            stateInit
+        );
+
+
+    if (
+        !derivedAddress.equals(
+            address
+        )
+    ) {
+
+        throw new Error(
+            "walletStateInit does not match wallet address"
+        );
+
+    }
+
+
+    return stateInit;
+
+}
+
+
+/*
+ * Verify the TON Proof.
+ *
+ * Public-key extraction is intentionally kept separate
+ * because wallet contract versions have different layouts.
+ */
 async function verifyTonProof({
 
-    address,
-
-    network,
-
-    publicKey,
-
-    walletStateInit,
-
+    account,
     proof,
-
     expectedPayload,
-
     expectedDomain
 
 }) {
 
-
-    if (!address) {
+    if (!account) {
 
         throw new Error(
-            "Wallet address missing"
+            "Wallet account is missing"
         );
 
     }
 
 
-    if (!network) {
+    if (!account.address) {
 
         throw new Error(
-            "Network missing"
+            "Wallet address is missing"
         );
 
     }
 
 
-    if (!publicKey) {
+    if (!account.chain) {
 
         throw new Error(
-            "Public key missing"
+            "Wallet network is missing"
         );
 
     }
 
 
-    if (!walletStateInit) {
+    if (!account.publicKey) {
 
         throw new Error(
-            "Wallet state init missing"
+            "Wallet public key is missing"
+        );
+
+    }
+
+
+    if (!account.walletStateInit) {
+
+        throw new Error(
+            "Wallet state init is missing"
         );
 
     }
@@ -379,11 +408,10 @@ async function verifyTonProof({
     if (!proof) {
 
         throw new Error(
-            "TON Proof missing"
+            "TON Proof is missing"
         );
 
     }
-
 
 
     if (
@@ -398,7 +426,6 @@ async function verifyTonProof({
     }
 
 
-
     if (
         proof.domain.value !==
         expectedDomain
@@ -411,123 +438,29 @@ async function verifyTonProof({
     }
 
 
-
-    const now =
-        Math.floor(
-            Date.now() / 1000
-        );
+    verifyTimestamp(
+        proof.timestamp
+    );
 
 
-    const timestamp =
-        Number(proof.timestamp);
+    /*
+     * Make sure the wallet state really belongs
+     * to the reported address.
+     */
+    verifyStateInitAddress(
+        account
+    );
 
 
-    if (
-        !Number.isSafeInteger(timestamp)
-    ) {
-
-        throw new Error(
-            "Invalid proof timestamp"
-        );
-
-    }
-
-
-    if (
-        Math.abs(
-            now - timestamp
-        ) > MAX_PROOF_AGE
-    ) {
-
-        throw new Error(
-            "Proof expired"
-        );
-
-    }
-
-
-
-    const stateInit =
-        loadStateInit(
-
-            Cell
-                .fromBase64(walletStateInit)
-                .beginParse()
-
-        );
-
-
-
-    const wantedAddress =
-        Address.parse(address);
-
-
-
-    const derivedAddress =
-        contractAddress(
-            wantedAddress.workChain,
-            stateInit
-        );
-
-
-
-    if (
-        !derivedAddress.equals(
-            wantedAddress
-        )
-    ) {
-
-        throw new Error(
-            "Wallet state does not match address"
-        );
-
-    }
-
-
-
-    const extractedPublicKey =
-        tryExtractPublicKey(
-            stateInit
-        );
-
-
-    if (!extractedPublicKey) {
-
-        throw new Error(
-            "Unable to extract wallet public key"
-        );
-
-    }
-
-
-
-    const reportedPublicKey =
-        Buffer.from(
-            publicKey,
-            "hex"
-        );
-
-
-    if (
-        !extractedPublicKey.equals(
-            reportedPublicKey
-        )
-    ) {
-
-        throw new Error(
-            "Wallet public key mismatch"
-        );
-
-    }
-
-
-
+    /*
+     * Build the exact digest specified
+     * by TON Connect.
+     */
     const digest =
-        buildProofDigest(
-            wantedAddress,
+        await buildTonProofDigest(
+            account,
             proof
         );
-
 
 
     const signature =
@@ -537,7 +470,38 @@ async function verifyTonProof({
         );
 
 
+    const publicKey =
+        Buffer.from(
+            account.publicKey,
+            "hex"
+        );
 
+
+    if (
+        publicKey.length !== 32
+    ) {
+
+        throw new Error(
+            "Invalid public key"
+        );
+
+    }
+
+
+    if (
+        signature.length !== 64
+    ) {
+
+        throw new Error(
+            "Invalid signature"
+        );
+
+    }
+
+
+    /*
+     * Verify Ed25519 signature.
+     */
     const valid =
         domainSignVerify({
 
@@ -545,16 +509,14 @@ async function verifyTonProof({
 
             signature,
 
-            publicKey:
-                extractedPublicKey,
+            publicKey,
 
             domain:
                 getSignatureDomain(
-                    network
+                    account.chain
                 )
 
         });
-
 
 
     if (!valid) {
@@ -566,28 +528,27 @@ async function verifyTonProof({
     }
 
 
-
     return {
 
         verified: true,
 
         address:
-            wantedAddress.toString(),
+            account.address,
 
-        network,
+        network:
+            account.chain,
 
         publicKey:
-            extractedPublicKey.toString(
-                "hex"
-            )
+            account.publicKey
 
     };
 
 }
 
 
-
 module.exports = {
+
+    generatePayload,
 
     verifyTonProof
 
